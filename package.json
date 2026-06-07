@@ -1,0 +1,18 @@
+{
+  "name": "clip-flow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "demo": "node src/demo.js",
+    "relay": "node src/relay-server.js",
+    "agent": "node src/agent.js",
+    "android:sim": "node src/android-sim.js",
+    "verify:single-windows": "node src/verify-single-windows.js",
+    "verify:windows-android-sim": "node src/verify-windows-android-sim.js"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
