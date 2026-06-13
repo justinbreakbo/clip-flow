@@ -2,6 +2,9 @@ package com.clipflow.android;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
 import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
@@ -11,10 +14,14 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Typeface;
+import android.media.AudioAttributes;
+import android.media.RingtoneManager;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.provider.Settings;
 import android.text.InputType;
 import android.view.Gravity;
 import android.view.View;
@@ -39,6 +46,10 @@ public class MainActivity extends Activity {
     static final String KEY_DEVICE_ID = "deviceId";
     static final String KEY_AUTO_ACCEPT = "autoAccept";
     static final String KEY_AUTO_START = "autoStart";
+    static final String KEY_APP_FOREGROUND = "appForeground";
+    static final String KEY_PENDING_REMOTE_TEXT = "pendingRemoteText";
+    static final String KEY_PENDING_REMOTE_SOURCE = "pendingRemoteSource";
+    static final String KEY_PENDING_REMOTE_CREATED_AT = "pendingRemoteCreatedAt";
     static final String DEFAULT_RELAY = "http://127.0.0.1:42821";
     static final String DEFAULT_SECRET = "change-this-local-secret";
     static final String DEFAULT_NAME = "Android";
@@ -54,7 +65,7 @@ public class MainActivity extends Activity {
     private TextView receivedText;
     private TextView logText;
     private CheckBox autoAcceptInput;
-    private CheckBox autoStartInput;
+    private boolean notificationPromptShowing = false;
 
     private ClipRelayClient client;
 
@@ -79,17 +90,16 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(buildLayout());
         restoreDefaults();
-        requestNotificationPermission();
         handleShareIntent(getIntent());
-
-        if (autoStartInput.isChecked()) {
-            startSyncService();
-        }
+        handleApplyPendingIntent(getIntent());
+        startSyncService();
+        ensureClipboardAlertNotifications();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        setAppForeground(true);
         IntentFilter filter = new IntentFilter(ClipSyncService.ACTION_STATUS);
         if (Build.VERSION.SDK_INT >= 33) {
             registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
@@ -101,6 +111,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         unregisterReceiver(statusReceiver);
+        setAppForeground(false);
         super.onPause();
     }
 
@@ -108,6 +119,7 @@ public class MainActivity extends Activity {
     protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         handleShareIntent(intent);
+        handleApplyPendingIntent(intent);
     }
 
     @Override
@@ -148,19 +160,14 @@ public class MainActivity extends Activity {
         autoAcceptInput.setChecked(true);
         root.addView(autoAcceptInput);
 
-        autoStartInput = new CheckBox(this);
-        autoStartInput.setText("Start auto sync when app opens");
-        autoStartInput.setChecked(true);
-        root.addView(autoStartInput);
-
         LinearLayout row1 = row();
         row1.addView(button("Save", view -> saveDefaults()));
-        row1.addView(button("Start Auto Sync", view -> startSyncService()));
+        row1.addView(button("Restart Sync", view -> startSyncService()));
         root.addView(row1);
 
         LinearLayout row2 = row();
         row2.addView(button("Stop Sync", view -> stopSyncService()));
-        row2.addView(button("Pull Once", view -> pollOnce()));
+        row2.addView(button("Copy Pending", view -> applyPendingRemoteClipboard()));
         root.addView(row2);
 
         LinearLayout row3 = row();
@@ -191,7 +198,6 @@ public class MainActivity extends Activity {
         secretInput.setText(prefs.getString(KEY_SECRET, DEFAULT_SECRET));
         deviceNameInput.setText(prefs.getString(KEY_NAME, DEFAULT_NAME));
         autoAcceptInput.setChecked(prefs.getBoolean(KEY_AUTO_ACCEPT, true));
-        autoStartInput.setChecked(prefs.getBoolean(KEY_AUTO_START, true));
         log("Android app ready");
     }
 
@@ -202,7 +208,7 @@ public class MainActivity extends Activity {
                 .putString(KEY_SECRET, secretInput.getText().toString())
                 .putString(KEY_NAME, deviceNameInput.getText().toString().trim())
                 .putBoolean(KEY_AUTO_ACCEPT, autoAcceptInput.isChecked())
-                .putBoolean(KEY_AUTO_START, autoStartInput.isChecked())
+                .putBoolean(KEY_AUTO_START, true)
                 .apply();
         log("Settings saved");
     }
@@ -219,10 +225,115 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void requestNotificationPermission() {
+    private void handleApplyPendingIntent(Intent intent) {
+        if (intent == null || !ClipSyncService.ACTION_APPLY_PENDING.equals(intent.getAction())) {
+            return;
+        }
+
+        applyPendingRemoteClipboard();
+    }
+
+    private void setAppForeground(boolean foreground) {
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putBoolean(KEY_APP_FOREGROUND, foreground)
+                .apply();
+    }
+
+    private void ensureClipboardAlertNotifications() {
+        createClipboardAlertChannel();
+
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, 1001);
+            main.postDelayed(this::ensureClipboardAlertNotifications, 1200);
+            return;
         }
+
+        if (clipboardAlertsEnabled()) {
+            return;
+        }
+
+        showNotificationSettingsPrompt();
+    }
+
+    private void createClipboardAlertChannel() {
+        if (Build.VERSION.SDK_INT < 26) {
+            return;
+        }
+
+        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null || manager.getNotificationChannel(ClipSyncService.PENDING_CHANNEL_ID) != null) {
+            return;
+        }
+
+        NotificationChannel channel = new NotificationChannel(
+                ClipSyncService.PENDING_CHANNEL_ID,
+                "Clip Flow Clipboard Alerts",
+                NotificationManager.IMPORTANCE_HIGH
+        );
+        Uri notificationSound = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION);
+        AudioAttributes audioAttributes = new AudioAttributes.Builder()
+                .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .build();
+        channel.setDescription("Shows incoming remote clipboards that are ready to copy.");
+        channel.enableVibration(true);
+        channel.setVibrationPattern(new long[] { 0, 160, 80, 160 });
+        channel.setSound(notificationSound, audioAttributes);
+        manager.createNotificationChannel(channel);
+    }
+
+    private boolean clipboardAlertsEnabled() {
+        NotificationManager manager = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+        if (manager == null) {
+            return true;
+        }
+
+        if (Build.VERSION.SDK_INT >= 24 && !manager.areNotificationsEnabled()) {
+            return false;
+        }
+
+        if (Build.VERSION.SDK_INT >= 26) {
+            NotificationChannel channel = manager.getNotificationChannel(ClipSyncService.PENDING_CHANNEL_ID);
+            return channel != null && channel.getImportance() >= NotificationManager.IMPORTANCE_HIGH;
+        }
+
+        return true;
+    }
+
+    private void showNotificationSettingsPrompt() {
+        if (notificationPromptShowing || isFinishing()) {
+            return;
+        }
+
+        notificationPromptShowing = true;
+        new AlertDialog.Builder(this)
+                .setTitle("Enable clipboard alerts")
+                .setMessage("Clip Flow needs the Clipboard Alerts notification channel enabled as important so incoming clips can pop up at the top of the screen.")
+                .setPositiveButton("Open Settings", (dialog, which) -> {
+                    notificationPromptShowing = false;
+                    openClipboardAlertSettings();
+                })
+                .setNegativeButton("Later", (dialog, which) -> {
+                    notificationPromptShowing = false;
+                    log("Clipboard alert notifications are not fully enabled");
+                })
+                .setOnCancelListener(dialog -> notificationPromptShowing = false)
+                .show();
+    }
+
+    private void openClipboardAlertSettings() {
+        Intent intent;
+        if (Build.VERSION.SDK_INT >= 26) {
+            intent = new Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(Settings.EXTRA_APP_PACKAGE, getPackageName())
+                    .putExtra(Settings.EXTRA_CHANNEL_ID, ClipSyncService.PENDING_CHANNEL_ID);
+        } else {
+            intent = new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:" + getPackageName()));
+        }
+
+        startActivity(intent);
     }
 
     private ClipRelayClient ensureClient() {
@@ -291,12 +402,25 @@ public class MainActivity extends Activity {
         });
     }
 
-    private void pollOnce() {
-        ClipRelayClient relayClient = ensureClient();
-        runIo(() -> {
-            relayClient.register();
-            relayClient.pollOnce(0, autoAcceptInput.isChecked(), handler());
-        });
+    private void applyPendingRemoteClipboard() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String text = prefs.getString(KEY_PENDING_REMOTE_TEXT, "");
+        String source = prefs.getString(KEY_PENDING_REMOTE_SOURCE, "remote device");
+
+        if (text == null || text.isEmpty()) {
+            log("No pending remote clipboard");
+            return;
+        }
+
+        writeClipboard(text);
+        receivedText.setText(text);
+        prefs.edit()
+                .remove(KEY_PENDING_REMOTE_TEXT)
+                .remove(KEY_PENDING_REMOTE_SOURCE)
+                .remove(KEY_PENDING_REMOTE_CREATED_AT)
+                .apply();
+
+        log("Copied pending clipboard from " + source + ": " + shortText(text));
     }
 
     private ClipRelayClient.MessageHandler handler() {

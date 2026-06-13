@@ -54,6 +54,29 @@ POST /payloads/fetch
 -> 写入剪贴板
 ```
 
+### Android 本地投递策略
+
+协议层收到 `clip.payload` 后，Android 端不会在所有场景都强行静默写入系统剪贴板。
+
+当前本地策略：
+
+```text
+Android App 前台
+-> 本地解密
+-> 直接写入 Android 剪贴板
+```
+
+```text
+Android App 后台
+-> 本地解密
+-> 保存为 pending clipboard
+-> 发送 Clip Flow Clipboard Alerts 高优先级通知
+-> 用户点击通知
+-> ClipSyncService 直接复制到 Android 剪贴板
+```
+
+这样做是为了适配 Android 10+ 后台剪贴板限制，并避免默认静默写入造成隐私风险。
+
 ### 敏感内容
 
 ```text
