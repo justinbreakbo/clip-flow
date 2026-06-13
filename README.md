@@ -5,130 +5,126 @@ Clip Flow 是一个类 Universal Clipboard 的跨设备剪贴板 MVP。
 当前已经跑通的主链路是：
 
 ```text
-Android 原生 App <-> 本地加密 relay <-> Windows 剪贴板 agent
+Android 原生 App <-> 本地加密 relay <-> Windows 桌面托盘入口/剪贴板 agent
 ```
 
 当前实现状态、已完成能力、待实现能力和阶段计划见 [plan.md](./plan.md)。
 
-## 运行前先理解三个角色
+## 当前可用能力
 
-当前 MVP 不是一个完整桌面 App，而是三个进程/应用配合工作：
+- Windows 桌面托盘入口：启动后自动运行本地 relay 和 Windows agent。
+- Windows 文本剪贴板自动同步：本地复制后发送到 relay，收到远端文本后写入剪贴板。
+- Android 可安装 Debug APK：启动后可开启前台同步服务。
+- Android 文本剪贴板自动同步：前台服务轮询本机文本剪贴板、长轮询接收远端文本。
+- Android 真机局域网同步：手机填写 Windows 局域网 IP 后可与桌面端同步。
+- Android Emulator 同步：使用 `adb reverse` 后可通过 `127.0.0.1:42821` 连接桌面 relay。
+- AES-256-GCM 加密 payload。
+- 普通文本/URL 自动投递，疑似敏感内容走 offer-first 流程。
 
-- relay：中继服务，负责设备注册、在线状态和加密消息转发。
-- Windows agent：Windows 剪贴板程序，负责读取和写入 Windows 剪贴板。
-- Android App：原生 Android APK，负责发送/接收 Android 文本剪贴板。
+## Windows 桌面端
 
-所以测试时通常需要打开两个 PowerShell 窗口：
-
-- 窗口 1 跑 relay。
-- 窗口 2 跑 Windows agent。
-
-如果使用 Android Emulator，还需要额外执行一次 `adb reverse`。
-
-## 方式一：Android Emulator 测试
-
-推荐使用端口 `42821`，避免和旧的 `42820` 进程冲突。
-
-### 1. 启动 relay
-
-PowerShell 窗口 1：
+推荐用桌面托盘入口启动当前 MVP：
 
 ```powershell
-$env:PORT="42821"
-npm run relay
+npm run desktop
 ```
 
-这个窗口不要关闭。
-
-### 2. 启动 Windows agent
-
-PowerShell 窗口 2：
-
-```powershell
-$env:CLIP_FLOW_SECRET="change-this-local-secret"
-$env:CLIP_FLOW_RELAY="http://localhost:42821"
-$env:CLIP_FLOW_AUTO_ACCEPT_OFFERS="true"
-npm run agent
-```
-
-这个窗口也不要关闭。
-
-这些环境变量的作用：
-
-- `CLIP_FLOW_SECRET`：和 Android App 里的 Secret 保持一致，用来加密/解密内容。
-- `CLIP_FLOW_RELAY`：告诉 Windows agent 连接哪个 relay。
-- `CLIP_FLOW_AUTO_ACCEPT_OFFERS`：测试阶段自动接收敏感内容 offer。
-
-### 3. 启动模拟器
-
-如果当前没有模拟器，请先启动：
-
-```powershell
-.\scripts\start-android-emulator.ps1
-```
-
-
-### 4. 建立端口映射
-
-模拟器里访问 `127.0.0.1` 指的是模拟器自己，不是 Windows。为了让 Android 模拟器里的 App 能访问 Windows 上的 relay 服务，需要执行：
-
-```powershell
-.tools\android-sdk\platform-tools\adb.exe reverse tcp:42821 tcp:42821
-```
-
-
-
-```powershell
-.\scripts\use-android-env.ps1
-adb reverse tcp:42821 tcp:42821
-```
-
-### 5. Android App 填写
-
-Android Emulator 中的 App 填：
+也可以在资源管理器里双击：
 
 ```text
-Relay URL: http://127.0.0.1:42821
-Secret: change-this-local-secret
+Clip Flow Desktop.vbs
 ```
 
-测试路径：
+如果希望保留命令行窗口用于排查问题，可以双击：
 
-1. 【连接 Relay】
-2. 点击【发送测试文本】，Windows 上粘贴，验证 Android -> Windows
-3. Windows 复制文本后，在 Android 点【拉取一次】，验证 Windows -> Android
+```text
+Clip Flow Desktop.cmd
+```
 
-## 方式二：Android 真机测试
+启动后会自动运行本地 relay 和 Windows agent。右键系统托盘里的 Clip Flow 图标可以：
 
-真机测试不需要 `adb reverse`。
+- 查看运行状态。
+- Start / Stop / Restart 同步。
+- 打开 Settings 设置页面。
+- 打开配置文件。
+- 打开日志目录。
+- 打开 README。
+- 退出并停止后台进程。
+
+桌面入口的配置文件会自动创建在：
+
+```text
+.clip-flow/desktop-config.json
+```
+
+默认配置：
+
+```json
+{
+  "port": 42821,
+  "relayUrl": "http://localhost:42821",
+  "secret": "change-this-local-secret",
+  "deviceName": "Windows PC",
+  "autoAcceptOffers": true,
+  "startSyncOnLaunch": true,
+  "clipboardPollMs": 1000,
+  "relayPollTimeoutMs": 25000
+}
+```
+
+## Android APK
+
+构建可安装的 Debug APK：
+
+```powershell
+npm run android:build
+```
+
+APK 输出位置：
+
+```text
+android-native/app/build/outputs/apk/debug/app-debug.apk
+```
+
+连接手机或模拟器后安装：
+
+```powershell
+npm run android:install
+```
+
+首次打开 App 后填写：
+
+```text
+Relay URL: http://<Windows-IP>:42821
+Secret: change-this-local-secret
+Device name: Android
+```
+
+其中 `Relay URL` 需要按测试环境填写：
+
+- Android 真机：填写 Windows 的局域网 IP，例如 `http://192.168.1.23:42821`。
+- Android Emulator：先执行 `adb reverse`，再填写 `http://127.0.0.1:42821`。
+
+点 `Start Auto Sync` 后，Android 会启动一个前台同步服务，并在通知栏显示 Clip Flow。服务会：
+
+- 轮询本机文本剪贴板变化并发送到 relay。
+- 长轮询接收远端文本并写入 Android 剪贴板。
+- 自动重试 relay 连接。
+- 可通过通知里的 Stop 或 App 里的 Stop Sync 停止。
+
+注意：Android 10+ 对后台读取剪贴板有限制，不同系统和厂商 ROM 行为可能不同。当前前台服务方案已经能保持远端接收和尽力轮询本机剪贴板；如果某些手机在 App 退到后台后不允许读取本机剪贴板，下一步需要增加无障碍增强模式。
+
+## 真机连接
 
 真机和 Windows 必须连接同一个 Wi-Fi。
 
-### 1. 启动 relay
-
-PowerShell 窗口 1：
+1. 在 Windows 上启动桌面端：
 
 ```powershell
-cd C:\Users\justinbreakbo\Documents\Sources\clip-flow
-
-$env:PORT="42821"
-npm run relay
+npm run desktop
 ```
 
-### 2. 启动 Windows agent
-
-PowerShell 窗口 2：
-
-```powershell
-cd C:\Users\justinbreakbo\Documents\Sources\clip-flow
-
-$env:CLIP_FLOW_SECRET="change-this-local-secret"
-$env:CLIP_FLOW_RELAY="http://localhost:42821"
-$env:CLIP_FLOW_AUTO_ACCEPT_OFFERS="true"
-npm run agent
-```
-
-### 3. 获取 Windows 局域网 IP
+2. 获取 Windows 局域网 IP：
 
 ```powershell
 ipconfig
@@ -140,28 +136,66 @@ ipconfig
 192.168.1.23
 ```
 
-### 4. Android App 填写
-
-真机不要填 `127.0.0.1`。
-
-应该填 Windows 的局域网 IP：
+3. Android App 中填写：
 
 ```text
-Relay URL: http://192.168.1.23:42821
+Relay URL: http://192.168.0.113:42821
 Secret: change-this-local-secret
 ```
+
+4. 点击 `Save`，再点击 `Start Auto Sync`。
 
 如果连接失败，优先检查：
 
 - 手机和 Windows 是否在同一个 Wi-Fi。
-- Windows 防火墙是否拦截了 Node/42821 端口。
-- relay 是否还在运行。
-- Android App 里的 Secret 是否和 Windows agent 一致。
+- Windows 防火墙是否拦截了 Node.js / 42821 端口。
+- 桌面端 relay 是否还在运行。
+- Android App 里的 Secret 是否和桌面端一致。
+- 手机浏览器是否能打开 `http://<Windows-IP>:42821/health`。
+
+## 模拟器连接
+
+如果使用 Android Emulator，需要建立端口映射：
+
+```powershell
+.\scripts\use-android-env.ps1
+adb reverse tcp:42821 tcp:42821
+```
+
+Android Emulator 中的 App 填：
+
+```text
+Relay URL: http://127.0.0.1:42821
+Secret: change-this-local-secret
+```
+
+## 手动进程模式
+
+桌面托盘入口会自动启动 relay 和 Windows agent。需要排查底层问题时，也可以手动启动两个进程。
+
+PowerShell 窗口 1：
+
+```powershell
+$env:PORT="42821"
+npm run relay
+```
+
+PowerShell 窗口 2：
+
+```powershell
+$env:CLIP_FLOW_SECRET="change-this-local-secret"
+$env:CLIP_FLOW_RELAY="http://localhost:42821"
+$env:CLIP_FLOW_AUTO_ACCEPT_OFFERS="true"
+npm run agent
+```
 
 ## 常用命令
 
 ```powershell
 npm test
+npm run desktop
+npm run android:build
+npm run android:install
 npm run verify:single-windows
 npm run verify:windows-android-sim
 .\scripts\build-android-debug.ps1
@@ -172,11 +206,11 @@ npm run verify:windows-android-sim
 ## 主要模块
 
 ```text
-src/relay-server.js       本地 HTTP relay
-src/agent.js              Windows 剪贴板 agent
-src/clipboard-windows.js  Windows 剪贴板适配器
-src/clip-client.js        共享 relay client
-src/android-sim.js        命令行 Android 模拟器
-android-native/           原生 Android MVP
-docs/protocol.md          协议说明
+scripts/clip-flow-desktop.ps1  Windows 桌面托盘入口
+src/relay-server.js            本地 HTTP relay
+src/agent.js                   Windows 剪贴板 agent
+src/clipboard-windows.js       Windows 剪贴板适配器
+src/clip-client.js             共享 relay client
+android-native/                原生 Android App
+docs/protocol.md               协议说明
 ```

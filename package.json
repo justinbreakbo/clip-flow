@@ -8,7 +8,10 @@
     "demo": "node src/demo.js",
     "relay": "node src/relay-server.js",
     "agent": "node src/agent.js",
+    "desktop": "powershell -NoProfile -ExecutionPolicy Bypass -STA -File scripts/clip-flow-desktop.ps1",
     "android:sim": "node src/android-sim.js",
+    "android:build": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-android-debug.ps1",
+    "android:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-android-apk.ps1",
     "verify:single-windows": "node src/verify-single-windows.js",
     "verify:windows-android-sim": "node src/verify-windows-android-sim.js"
   },

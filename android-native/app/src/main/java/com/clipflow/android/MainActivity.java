@@ -1,12 +1,17 @@
 package com.clipflow.android;
 
+import android.Manifest;
 import android.app.Activity;
+import android.content.BroadcastReceiver;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.graphics.Typeface;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -27,6 +32,17 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends Activity {
+    static final String PREFS = "clip-flow";
+    static final String KEY_RELAY = "relay";
+    static final String KEY_SECRET = "secret";
+    static final String KEY_NAME = "name";
+    static final String KEY_DEVICE_ID = "deviceId";
+    static final String KEY_AUTO_ACCEPT = "autoAccept";
+    static final String KEY_AUTO_START = "autoStart";
+    static final String DEFAULT_RELAY = "http://127.0.0.1:42821";
+    static final String DEFAULT_SECRET = "change-this-local-secret";
+    static final String DEFAULT_NAME = "Android";
+
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
 
@@ -38,17 +54,54 @@ public class MainActivity extends Activity {
     private TextView receivedText;
     private TextView logText;
     private CheckBox autoAcceptInput;
-    private Button watchButton;
+    private CheckBox autoStartInput;
 
     private ClipRelayClient client;
-    private boolean watching = false;
+
+    private final BroadcastReceiver statusReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (!ClipSyncService.ACTION_STATUS.equals(intent.getAction())) {
+                return;
+            }
+
+            String state = intent.getStringExtra(ClipSyncService.EXTRA_STATE);
+            String message = intent.getStringExtra(ClipSyncService.EXTRA_MESSAGE);
+            statusText.setText(state == null ? "Unknown" : state);
+            if (message != null && !message.trim().isEmpty()) {
+                log(message);
+            }
+        }
+    };
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(buildLayout());
         restoreDefaults();
+        requestNotificationPermission();
         handleShareIntent(getIntent());
+
+        if (autoStartInput.isChecked()) {
+            startSyncService();
+        }
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        IntentFilter filter = new IntentFilter(ClipSyncService.ACTION_STATUS);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(statusReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(statusReceiver, filter);
+        }
+    }
+
+    @Override
+    protected void onPause() {
+        unregisterReceiver(statusReceiver);
+        super.onPause();
     }
 
     @Override
@@ -59,7 +112,6 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        watching = false;
         io.shutdownNow();
         super.onDestroy();
     }
@@ -77,13 +129,14 @@ public class MainActivity extends Activity {
         title.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(title);
 
-        statusText = label("未连接");
+        statusText = label("Stopped");
+        statusText.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(statusText);
 
-        relayInput = input("Relay URL", "http://127.0.0.1:42821", false);
-        secretInput = input("共享 Secret", "change-this-local-secret", false);
-        deviceNameInput = input("设备名", "Android", false);
-        sendInput = input("发送内容", "hello from native Android", true);
+        relayInput = input("Relay URL", DEFAULT_RELAY, false);
+        secretInput = input("Shared Secret", DEFAULT_SECRET, false);
+        deviceNameInput = input("Device name", DEFAULT_NAME, false);
+        sendInput = input("Text to send", "hello from Android", true);
 
         root.addView(relayInput);
         root.addView(secretInput);
@@ -91,36 +144,38 @@ public class MainActivity extends Activity {
         root.addView(sendInput);
 
         autoAcceptInput = new CheckBox(this);
-        autoAcceptInput.setText("自动接收 offer（测试用）");
+        autoAcceptInput.setText("Auto-accept sensitive offers for testing");
         autoAcceptInput.setChecked(true);
         root.addView(autoAcceptInput);
 
+        autoStartInput = new CheckBox(this);
+        autoStartInput.setText("Start auto sync when app opens");
+        autoStartInput.setChecked(true);
+        root.addView(autoStartInput);
+
         LinearLayout row1 = row();
-        row1.addView(button("连接 Relay", view -> connect()));
-        row1.addView(button("发送文本", view -> sendText()));
+        row1.addView(button("Save", view -> saveDefaults()));
+        row1.addView(button("Start Auto Sync", view -> startSyncService()));
         root.addView(row1);
 
         LinearLayout row2 = row();
-        row2.addView(button("发送剪贴板", view -> sendClipboard()));
-        row2.addView(button("拉取一次", view -> pollOnce()));
+        row2.addView(button("Stop Sync", view -> stopSyncService()));
+        row2.addView(button("Pull Once", view -> pollOnce()));
         root.addView(row2);
 
         LinearLayout row3 = row();
-        row3.addView(button("发送测试文本", view -> sendPresetText()));
-        row3.addView(button("发送敏感测试", view -> sendSensitivePreset()));
+        row3.addView(button("Send Clipboard", view -> sendClipboard()));
+        row3.addView(button("Send Test", view -> sendPresetText()));
         root.addView(row3);
 
-        watchButton = button("开始接收", view -> toggleWatch());
-        root.addView(watchButton);
-
-        TextView receivedLabel = label("最近接收");
+        TextView receivedLabel = label("Latest received");
         receivedLabel.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(receivedLabel);
 
-        receivedText = box("等待内容");
+        receivedText = box("Waiting for content");
         root.addView(receivedText);
 
-        TextView logLabel = label("日志");
+        TextView logLabel = label("Log");
         logLabel.setTypeface(Typeface.DEFAULT_BOLD);
         root.addView(logLabel);
 
@@ -131,20 +186,25 @@ public class MainActivity extends Activity {
     }
 
     private void restoreDefaults() {
-        SharedPreferences prefs = getSharedPreferences("clip-flow", MODE_PRIVATE);
-        relayInput.setText(prefs.getString("relay", relayInput.getText().toString()));
-        secretInput.setText(prefs.getString("secret", secretInput.getText().toString()));
-        deviceNameInput.setText(prefs.getString("name", deviceNameInput.getText().toString()));
-        log("原生 Android 工程已启动");
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        relayInput.setText(prefs.getString(KEY_RELAY, DEFAULT_RELAY));
+        secretInput.setText(prefs.getString(KEY_SECRET, DEFAULT_SECRET));
+        deviceNameInput.setText(prefs.getString(KEY_NAME, DEFAULT_NAME));
+        autoAcceptInput.setChecked(prefs.getBoolean(KEY_AUTO_ACCEPT, true));
+        autoStartInput.setChecked(prefs.getBoolean(KEY_AUTO_START, true));
+        log("Android app ready");
     }
 
     private void saveDefaults() {
-        getSharedPreferences("clip-flow", MODE_PRIVATE)
+        getSharedPreferences(PREFS, MODE_PRIVATE)
                 .edit()
-                .putString("relay", relayInput.getText().toString())
-                .putString("secret", secretInput.getText().toString())
-                .putString("name", deviceNameInput.getText().toString())
+                .putString(KEY_RELAY, relayInput.getText().toString().trim())
+                .putString(KEY_SECRET, secretInput.getText().toString())
+                .putString(KEY_NAME, deviceNameInput.getText().toString().trim())
+                .putBoolean(KEY_AUTO_ACCEPT, autoAcceptInput.isChecked())
+                .putBoolean(KEY_AUTO_START, autoStartInput.isChecked())
                 .apply();
+        log("Settings saved");
     }
 
     private void handleShareIntent(Intent intent) {
@@ -155,36 +215,49 @@ public class MainActivity extends Activity {
         CharSequence text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
         if (text != null) {
             sendInput.setText(text.toString());
-            log("已从分享菜单接收文本");
+            log("Text received from Android share sheet");
         }
     }
 
-    private void connect() {
-        saveDefaults();
-        String deviceId = getOrCreateDeviceId();
-        client = new ClipRelayClient(
-                relayInput.getText().toString().trim(),
-                deviceId,
-                deviceNameInput.getText().toString().trim(),
-                secretInput.getText().toString()
-        );
-
-        runIo(() -> {
-            client.register();
-            ui(() -> {
-                statusText.setText("已连接 " + deviceId.substring(0, 8));
-                log("已连接 relay");
-            });
-        });
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[] { Manifest.permission.POST_NOTIFICATIONS }, 1001);
+        }
     }
 
-    private void sendText() {
-        ensureClient();
-        String value = sendInput.getText().toString();
-        runIo(() -> {
-            JSONObject result = client.sendText(value);
-            ui(() -> log("已发送，queuedFor=" + result.optInt("queuedFor")));
-        });
+    private ClipRelayClient ensureClient() {
+        if (client == null) {
+            saveDefaults();
+            client = new ClipRelayClient(
+                    relayInput.getText().toString().trim(),
+                    getOrCreateDeviceId(),
+                    deviceNameInput.getText().toString().trim(),
+                    secretInput.getText().toString()
+            );
+        }
+
+        return client;
+    }
+
+    private void startSyncService() {
+        saveDefaults();
+        Intent intent = new Intent(this, ClipSyncService.class);
+        intent.setAction(ClipSyncService.ACTION_START);
+        if (Build.VERSION.SDK_INT >= 26) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+        statusText.setText("Starting sync");
+        log("Foreground sync service starting");
+    }
+
+    private void stopSyncService() {
+        Intent intent = new Intent(this, ClipSyncService.class);
+        intent.setAction(ClipSyncService.ACTION_STOP);
+        startService(intent);
+        statusText.setText("Stopped");
+        log("Foreground sync service stopping");
     }
 
     private void sendClipboard() {
@@ -200,43 +273,30 @@ public class MainActivity extends Activity {
         }
 
         sendInput.setText(value);
-        sendText();
+        sendText(value);
     }
 
     private void sendPresetText() {
-        sendInput.setText("android native test " + System.currentTimeMillis());
-        sendText();
+        String value = "android native test " + System.currentTimeMillis();
+        sendInput.setText(value);
+        sendText(value);
     }
 
-    private void sendSensitivePreset() {
-        sendInput.setText("api_key=androidnative" + System.currentTimeMillis());
-        sendText();
+    private void sendText(String value) {
+        ClipRelayClient relayClient = ensureClient();
+        runIo(() -> {
+            relayClient.register();
+            JSONObject result = relayClient.sendText(value);
+            ui(() -> log("Sent, queuedFor=" + result.optInt("queuedFor")));
+        });
     }
 
     private void pollOnce() {
-        ensureClient();
-        runIo(() -> client.pollOnce(0, autoAcceptInput.isChecked(), handler()));
-    }
-
-    private void toggleWatch() {
-        ensureClient();
-        watching = !watching;
-        watchButton.setText(watching ? "停止接收" : "开始接收");
-
-        if (watching) {
-            runIo(this::watchLoop);
-        }
-    }
-
-    private void watchLoop() throws Exception {
-        while (watching && !Thread.currentThread().isInterrupted()) {
-            try {
-                client.pollOnce(25000, autoAcceptInput.isChecked(), handler());
-            } catch (Exception error) {
-                ui(() -> log("接收连接中断，正在重试：" + shortError(error)));
-                Thread.sleep(1200);
-            }
-        }
+        ClipRelayClient relayClient = ensureClient();
+        runIo(() -> {
+            relayClient.register();
+            relayClient.pollOnce(0, autoAcceptInput.isChecked(), handler());
+        });
     }
 
     private ClipRelayClient.MessageHandler handler() {
@@ -246,13 +306,13 @@ public class MainActivity extends Activity {
                 ui(() -> {
                     receivedText.setText(text);
                     writeClipboard(text);
-                    log("收到并写入剪贴板：" + shortText(text));
+                    log("Received from " + sourceDeviceId + ": " + shortText(text));
                 });
             }
 
             @Override
             public void onOffer(String sourceDeviceId, JSONObject message) {
-                ui(() -> log("收到待确认 offer：" + message.optJSONObject("offer").optString("contentType")));
+                ui(() -> log("Offer from " + sourceDeviceId + ": " + message.optJSONObject("offer").optString("contentType")));
             }
 
             @Override
@@ -269,21 +329,15 @@ public class MainActivity extends Activity {
         }
     }
 
-    private void ensureClient() {
-        if (client == null) {
-            connect();
-        }
-    }
-
     private String getOrCreateDeviceId() {
-        SharedPreferences prefs = getSharedPreferences("clip-flow", MODE_PRIVATE);
-        String existing = prefs.getString("deviceId", null);
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String existing = prefs.getString(KEY_DEVICE_ID, null);
         if (existing != null) {
             return existing;
         }
 
         String created = UUID.randomUUID().toString();
-        prefs.edit().putString("deviceId", created).apply();
+        prefs.edit().putString(KEY_DEVICE_ID, created).apply();
         return created;
     }
 
@@ -292,7 +346,7 @@ public class MainActivity extends Activity {
             try {
                 runnable.run();
             } catch (Exception error) {
-                ui(() -> log("错误：" + error.getMessage()));
+                ui(() -> log("Error: " + shortError(error)));
             }
         });
     }
