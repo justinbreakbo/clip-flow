@@ -50,7 +50,7 @@ public class MainActivity extends Activity {
     static final String KEY_PENDING_REMOTE_TEXT = "pendingRemoteText";
     static final String KEY_PENDING_REMOTE_SOURCE = "pendingRemoteSource";
     static final String KEY_PENDING_REMOTE_CREATED_AT = "pendingRemoteCreatedAt";
-    static final String DEFAULT_RELAY = "http://127.0.0.1:42821";
+    static final String DEFAULT_RELAY = "http://192.168.0.113:42821";
     static final String DEFAULT_SECRET = "change-this-local-secret";
     static final String DEFAULT_NAME = "Android";
 

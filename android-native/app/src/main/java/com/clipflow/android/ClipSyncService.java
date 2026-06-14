@@ -38,10 +38,11 @@ public class ClipSyncService extends Service {
     private static final int CLIPBOARD_POLL_MS = 1000;
     private static final int RELAY_POLL_TIMEOUT_MS = 25000;
 
-    private final ExecutorService io = Executors.newFixedThreadPool(2);
+    private final ExecutorService io = Executors.newFixedThreadPool(4);
     private final AtomicBoolean running = new AtomicBoolean(false);
 
     private ClipboardManager clipboard;
+    private ClipboardManager.OnPrimaryClipChangedListener clipboardListener;
     private ClipRelayClient client;
     private boolean autoAcceptOffers;
     private String lastLocalClipboard = "";
@@ -52,6 +53,7 @@ public class ClipSyncService extends Service {
         super.onCreate();
         clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
         createNotificationChannel();
+        clipboardListener = () -> io.execute(() -> sendCurrentClipboardIfChanged("Clipboard changed"));
     }
 
     @Override
@@ -93,6 +95,8 @@ public class ClipSyncService extends Service {
         reloadClientFromPrefs();
         publishStatus("Starting", "Sync service started");
         updateNotification("Syncing clipboard");
+        attachClipboardListener();
+        io.execute(() -> sendCurrentClipboardIfChanged("Initial clipboard check"));
         io.execute(this::localClipboardLoop);
         io.execute(this::remoteRelayLoop);
     }
@@ -110,6 +114,7 @@ public class ClipSyncService extends Service {
 
     private void stopSync() {
         if (running.compareAndSet(true, false)) {
+            detachClipboardListener();
             publishStatus("Stopped", "Sync service stopped");
             updateNotification("Stopped");
         }
@@ -118,22 +123,66 @@ public class ClipSyncService extends Service {
     private void localClipboardLoop() {
         while (running.get() && !Thread.currentThread().isInterrupted()) {
             try {
-                if (client == null) {
-                    reloadClientFromPrefs();
-                }
-                String value = readClipboardText();
-                if (!value.isEmpty() && !value.equals(lastLocalClipboard) && !value.equals(lastAppliedRemote)) {
-                    lastLocalClipboard = value;
-                    client.register();
-                    JSONObject result = client.sendText(value);
-                    publishStatus("Running", "Sent clipboard, queuedFor=" + result.optInt("queuedFor"));
-                    updateNotification("Sent clipboard");
-                }
+                sendCurrentClipboardIfChanged("Clipboard poll");
             } catch (Exception error) {
                 publishStatus("Warning", "Clipboard sync failed: " + shortError(error));
             }
 
             sleep(CLIPBOARD_POLL_MS);
+        }
+    }
+
+    private void attachClipboardListener() {
+        if (clipboard != null && clipboardListener != null) {
+            clipboard.removePrimaryClipChangedListener(clipboardListener);
+            clipboard.addPrimaryClipChangedListener(clipboardListener);
+        }
+    }
+
+    private void detachClipboardListener() {
+        if (clipboard != null && clipboardListener != null) {
+            clipboard.removePrimaryClipChangedListener(clipboardListener);
+        }
+    }
+
+    private void sendCurrentClipboardIfChanged(String reason) {
+        if (!running.get()) {
+            return;
+        }
+
+        try {
+            if (client == null) {
+                reloadClientFromPrefs();
+            }
+
+            sendTextIfChanged(readClipboardText(), reason);
+        } catch (Exception error) {
+            publishStatus("Warning", reason + " failed: " + shortError(error));
+        }
+    }
+
+    private void sendTextIfChanged(String value, String reason) {
+        try {
+            if (client == null) {
+                reloadClientFromPrefs();
+            }
+
+            if (value == null) {
+                return;
+            }
+
+            String trimmed = value.trim();
+            if (trimmed.isEmpty() || trimmed.equals(lastLocalClipboard) || trimmed.equals(lastAppliedRemote)) {
+                return;
+            }
+
+            lastLocalClipboard = trimmed;
+            client.register();
+            JSONObject result = client.sendText(trimmed);
+            publishStatus("Running", reason + ": sent text, queuedFor=" + result.optInt("queuedFor"));
+            updateNotification("Sent clipboard");
+        } catch (Exception error) {
+            publishStatus("Warning", reason + " failed: " + shortError(error));
         }
     }
 

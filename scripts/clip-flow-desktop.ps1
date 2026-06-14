@@ -55,7 +55,8 @@ function Resolve-Node {
 
 function Write-ProcessLog($Path, $Line) {
     if ($null -ne $Line -and $Line.Length -gt 0) {
-        Add-Content -Path $Path -Encoding UTF8 -Value ("[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Line)
+        $entry = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Line
+        [System.IO.File]::AppendAllText($Path, $entry + [Environment]::NewLine, [System.Text.UTF8Encoding]::new($true))
     }
 }
 
@@ -77,10 +78,16 @@ function Start-NodeProcess($Name, $ScriptPath, $LogPath, $Environment) {
     $info.CreateNoWindow = $true
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true
+    $info.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $info.StandardErrorEncoding = [System.Text.Encoding]::UTF8
 
     foreach ($key in $Environment.Keys) {
         $info.Environment[$key] = Convert-ToEnvValue $Environment[$key]
     }
+
+    $info.Environment["LANG"] = "en_US.UTF-8"
+    $info.Environment["LC_ALL"] = "en_US.UTF-8"
+    $info.Environment["NODE_DISABLE_COLORS"] = "1"
 
     $process = [System.Diagnostics.Process]::new()
     $process.StartInfo = $info
